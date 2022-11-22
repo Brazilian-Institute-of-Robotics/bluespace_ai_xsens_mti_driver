@@ -332,6 +332,9 @@ void XdaInterface::declareCommonParameters()
 	std::string frame_id = DEFAULT_FRAME_ID;
 	declare_parameter("frame_id", frame_id);
 
+	std::string reference_frame_id = DEFAULT_REFERENCE_FRAME_ID;
+	declare_parameter("reference_frame_id", reference_frame_id);
+
 	int pub_queue_size = 5;
 	declare_parameter("publisher_queue_size", pub_queue_size);
 
