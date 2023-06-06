@@ -11,11 +11,20 @@ endif()
 # Find dependencies
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
+find_package(rclcpp_action REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(rosidl_default_generators REQUIRED)
+
+rosidl_generate_interfaces(${PROJECT_NAME}
+  "action/SetNoRotation.action"
+  DEPENDENCIES std_msgs
+)
+
+ament_export_dependencies(rosidl_default_runtime)
 
 ###########
 ## Build ##
@@ -35,11 +44,16 @@ target_include_directories(xsens_mti_node PUBLIC
 
 ament_target_dependencies(xsens_mti_node 
   rclcpp
+  rclcpp_action
   tf2
   tf2_ros
   std_msgs
   geometry_msgs
   sensor_msgs
+)
+
+rosidl_target_interfaces(xsens_mti_node
+  ${PROJECT_NAME} "rosidl_typesupport_cpp"
 )
 
 target_link_libraries(

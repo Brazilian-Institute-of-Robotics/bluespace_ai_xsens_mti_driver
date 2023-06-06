@@ -59,6 +59,10 @@
 //  ARBITRATORS APPOINTED IN ACCORDANCE WITH SAID RULES.
 //  
 
+#include <chrono>
+#include <thread>
+#include <mutex>
+
 #include "xdainterface.h"
 
 #include <xscontroller/xsscanner.h>
@@ -83,6 +87,8 @@
 #include "messagepublishers/positionllapublisher.h"
 #include "messagepublishers/velocitypublisher.h"
 
+#define BIT(k, n) ((n >> k) & 1)
+
 XdaInterface::XdaInterface(const std::string &node_name, const rclcpp::NodeOptions &options)
 	: Node(node_name, options)
 	, m_device(nullptr)
@@ -92,6 +98,45 @@ XdaInterface::XdaInterface(const std::string &node_name, const rclcpp::NodeOptio
 	RCLCPP_INFO(get_logger(), "Creating XsControl object...");
 	m_control = XsControl::construct();
 	assert(m_control != 0);
+
+	auto handle_goal = [&](
+		const rclcpp_action::GoalUUID & uuid,
+		std::shared_ptr<
+			const bluespace_ai_xsens_mti_driver::action::SetNoRotation::Goal>
+			goal) -> rclcpp_action::GoalResponse
+		{
+			(void)uuid;
+			(void)goal;
+			return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
+		};
+
+	auto handle_cancel = [&](const std::shared_ptr<
+		rclcpp_action::ServerGoalHandle<
+		bluespace_ai_xsens_mti_driver::action::SetNoRotation>>
+		goal_handle) -> rclcpp_action::CancelResponse
+		{
+			(void)goal_handle;
+			return rclcpp_action::CancelResponse::REJECT;
+		};
+
+	auto handle_accepted = [&](const std::shared_ptr<
+		rclcpp_action::ServerGoalHandle<
+		bluespace_ai_xsens_mti_driver::action::SetNoRotation>>
+		goal_handle) {
+			
+        std::thread{
+			std::bind(
+				&XdaInterface::executeMgbe, this, std::placeholders::_1),
+            goal_handle}.detach();
+		};
+
+    mgbe_server = rclcpp_action::create_server<bluespace_ai_xsens_mti_driver::action::SetNoRotation>(
+		this,
+		"set_no_rotation",
+		handle_goal,
+		handle_cancel,
+		handle_accepted
+	);
 }
 
 XdaInterface::~XdaInterface()
@@ -107,6 +152,11 @@ void XdaInterface::spinFor(std::chrono::milliseconds timeout)
 
 	if (!rosPacket.second.empty())
 	{
+		if(rosPacket.second.containsStatus()){
+			const std::lock_guard<std::mutex> lock(mutex);
+			status_word = rosPacket.second.status();
+		}
+
 		for (auto &cb : m_callbacks)
 		{
 			cb->operator()(rosPacket.second, rosPacket.first);
@@ -254,7 +304,18 @@ bool XdaInterface::connectDevice()
 	RCLCPP_INFO(get_logger(), "Found a device with ID: %s @ port: %s, baudrate: %d", mtPort.deviceId().toString().toStdString().c_str(), mtPort.portName().toStdString().c_str(), XsBaud::rateToNumeric(mtPort.baudrate()));
 
 	RCLCPP_INFO(get_logger(), "Opening port %s ...", mtPort.portName().toStdString().c_str());
-	if (!m_control->openPort(mtPort))
+	int port_counter = 0;
+	while (port_counter < 10) {
+		if (m_control->openPort(mtPort)) {
+			break;
+		}
+
+		port_counter++;
+		RCLCPP_INFO(get_logger(), "Failed to open port %s %d time...", mtPort.portName().toStdString().c_str(), port_counter);
+		std::this_thread::sleep_for(std::chrono::milliseconds(500));
+	}
+
+	if (port_counter >= 10)
 		return handleError("Could not open port");
 
 	m_device = m_control->device(mtPort.deviceId());
@@ -281,6 +342,13 @@ bool XdaInterface::prepare()
 	RCLCPP_INFO(get_logger(), "Measuring ...");
 	if (!m_device->gotoMeasurement())
 		return handleError("Could not put device into measurement mode");
+
+	// Perform a Manual Gyro Bias Estimation
+	std::this_thread::sleep_for(std::chrono::seconds(1));
+	RCLCPP_INFO(get_logger(), "Performing Manual Gyro Bias Estimation for 10 seconds");
+	if (!perform_mgbe(10))
+		return handleError("Could not finish Manual Gyro Bias Estimation");
+	RCLCPP_INFO(get_logger(), "Finished Manual Gyro Bias Estimation");
 
 	bool enable_logging = false;
 	get_parameter("enable_logging", enable_logging);
@@ -363,4 +431,64 @@ void XdaInterface::declareCommonParameters()
 
 	declare_parameter("enable_logging", false);
 	declare_parameter("log_file", "log.mtb");
+}
+
+bool XdaInterface::perform_mgbe(uint16_t duration) {
+	if (!m_device->setNoRotation(duration))
+		return handleError("MGBE Command not received!");
+
+	int counter = 0;
+	auto start_t = std::chrono::system_clock::now();
+	while (counter < 10) {
+		if(std::chrono::system_clock::now() - start_t > std::chrono::seconds(1)){
+			counter++;
+			RCLCPP_INFO(get_logger(), "Calibrating ... %d/10", counter);
+			start_t = std::chrono::system_clock::now();
+		}
+	}
+	return true;
+}
+
+void XdaInterface::executeMgbe(
+	const std::shared_ptr<rclcpp_action::ServerGoalHandle<
+		bluespace_ai_xsens_mti_driver::action::SetNoRotation>>
+		goal_handle) 
+{
+	auto result = std::make_shared<
+		bluespace_ai_xsens_mti_driver::action::SetNoRotation::Result>();
+
+	const auto goal = goal_handle->get_goal();
+
+	if (m_device->setNoRotation(goal->seconds)) {
+		auto check_mgbe_running = [&]() -> bool {
+			const std::lock_guard<std::mutex> lock(mutex);
+			return BIT(3, status_word) & BIT(4, status_word);
+		};
+
+		auto start = std::chrono::system_clock::now();
+		do {
+			std::this_thread::sleep_for(std::chrono::seconds(2));
+			RCLCPP_INFO(get_logger(), "Calibrating ... %d/%d", 
+						static_cast<int>((std::chrono::system_clock::now() - start).count() * 1e-9), 
+						goal->seconds);
+		} while (check_mgbe_running());
+		
+		const std::lock_guard<std::mutex> lock(mutex);
+		
+		if (BIT(3, status_word) ^ BIT(4, status_word)){
+			RCLCPP_ERROR(get_logger(), "Motion detected, MGBE failed!");
+			result->result = false;
+			goal_handle->abort(result);
+
+		} else {
+			RCLCPP_INFO(get_logger(), "Successful MGBE");
+			result->result = true;
+			goal_handle->succeed(result);
+		}
+
+	} else {
+		RCLCPP_ERROR(get_logger(), "SetNoRotation msg not received");
+		result->result = false;
+		goal_handle->abort(result);
+	}
 }
