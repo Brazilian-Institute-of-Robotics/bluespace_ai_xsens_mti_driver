@@ -63,8 +63,10 @@
 #define XDAINTERFACE_H
 
 #include <rclcpp/rclcpp.hpp>
+#include <rclcpp_action/rclcpp_action.hpp>
 
 #include "xdacallback.h"
+#include "bluespace_ai_xsens_mti_driver/action/set_no_rotation.hpp"
 #include <xstypes/xsportinfo.h>
 
 #include "chrono"
@@ -95,11 +97,22 @@ private:
 	bool handleError(std::string error);
 	void declareCommonParameters();
 
+	void executeMgbe(
+		const std::shared_ptr<rclcpp_action::ServerGoalHandle<
+		bluespace_ai_xsens_mti_driver::action::SetNoRotation>>
+		goal_handle);
+
+	bool perform_mgbe(uint16_t duration);
+
 	XsControl *m_control;
 	XsDevice *m_device;
 	XsPortInfo m_port;
 	XdaCallback m_xdaCallback;
 	std::list<PacketCallback *> m_callbacks;
+	uint32_t status_word = 0;
+	std::mutex mutex;
+	rclcpp_action::Server<
+		bluespace_ai_xsens_mti_driver::action::SetNoRotation>::SharedPtr mgbe_server;
 };
 
 #endif
